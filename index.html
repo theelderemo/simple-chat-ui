@@ -1,0 +1,1031 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bedrock Local Workbench</title>
+    <!-- if you're reading this, you're hired (not really, we can't afford you) -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Stack Overflow: 47% of this code -->
+    <style>
+        body {
+            background: radial-gradient(circle at top, #2d2d2d 0%, #1a1a1a 60%, #1a1a1a 100%);
+            color: #f5f3f0;
+        }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        pre { white-space: pre-wrap; word-wrap: break-word; }
+
+        ::selection {
+            background-color: rgba(255, 107, 53, 0.3);
+            color: #f5f3f0;
+        }
+
+        .bg-slate-950 { background-color: #1a1a1a !important; }
+        .bg-slate-900 { background-color: #2d2d2d !important; }
+        .bg-slate-900\/50 { background-color: rgba(45, 45, 45, 0.82) !important; }
+        .bg-slate-800 { background-color: #2d2d2d !important; }
+        .bg-slate-700 { background-color: #444444 !important; }
+
+        .border-slate-800 { border-color: #444444 !important; }
+        .border-slate-700 { border-color: #444444 !important; }
+        .border-slate-600 { border-color: #6b6b6b !important; }
+        .border-slate-500 { border-color: #b8b8b8 !important; }
+
+        .text-slate-100 { color: #f5f3f0 !important; }
+        .text-slate-200 { color: #f5f3f0 !important; }
+        .text-slate-300 { color: #e2ddd8 !important; }
+        .text-slate-400 { color: #b8b8b8 !important; }
+        .text-slate-500 { color: #8f8f8f !important; }
+        .text-slate-600 { color: #6b6b6b !important; }
+
+        .bg-blue-600 { background-color: #ff6b35 !important; }
+        .hover\:bg-blue-500:hover { background-color: #ff8c5a !important; }
+        .text-blue-400 { color: #ff6b35 !important; }
+        .hover\:text-blue-400:hover { color: #ff8c5a !important; }
+        .focus\:ring-blue-500:focus,
+        .focus-within\:border-blue-500:focus-within {
+            --tw-ring-color: #ff6b35 !important;
+            border-color: #ff6b35 !important;
+        }
+        .accent-blue-500 { accent-color: #ff6b35 !important; }
+
+        .hover\:bg-slate-700\/50:hover { background-color: rgba(255, 107, 53, 0.16) !important; }
+        .hover\:bg-slate-800:hover { background-color: #444444 !important; }
+
+        .bg-black\/20 { background-color: rgba(255, 107, 53, 0.15) !important; }
+        .border-white\/10 { border-color: rgba(255, 107, 53, 0.28) !important; }
+    </style>
+</head>
+<body>
+    <!-- This div took 3 hours. Don't ask. -->
+    <!-- temporary fix, permanent vibes -->
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        const FREE_GPT5_MODEL = { id: 'free-gpt-5', name: 'Free GPT-5', provider: 'free-gpt5' };
+
+        const modelKey = (model) => `${model.provider}:${model.id}`;
+        const FREE_GPT5_KEY = modelKey(FREE_GPT5_MODEL);
+
+        const withFreeModel = (list = []) => {
+            const cleaned = (Array.isArray(list) ? list : [])
+                .filter((model) => model && typeof model === 'object')
+                .filter((model) => modelKey(model) !== FREE_GPT5_KEY && model.provider !== 'free-gpt5');
+
+            return [...cleaned, FREE_GPT5_MODEL];
+        };
+
+        const withoutFreeModel = (list = []) =>
+            (Array.isArray(list) ? list : [])
+                .filter((model) => model && typeof model === 'object')
+                .filter((model) => modelKey(model) !== FREE_GPT5_KEY && model.provider !== 'free-gpt5');
+
+        const toModelDraft = (model = {}) => ({
+            name: model.name || '',
+            provider: model.provider || 'bedrock',
+            id: model.id || '',
+            inferenceProfileArn: model.inferenceProfileArn || '',
+            azureDeployment: model.azureDeployment || '',
+            bedrockMaxTokens: model.bedrockMaxTokens ?? '',
+            bedrockStopSequences: Array.isArray(model.bedrockStopSequences) ? model.bedrockStopSequences.join('\n') : (model.bedrockStopSequences || ''),
+            bedrockLatency: model.bedrockLatency || ''
+        });
+
+        const createEmptyModelDraft = () => toModelDraft();
+
+        const PROVIDER_SECTIONS = [
+            { key: 'bedrock', title: 'Bedrock Settings', env: 'Uses AWS_BEARER_TOKEN_BEDROCK and optional AWS_DEFAULT_REGION from .env.' },
+            { key: 'openai', title: 'OpenAI Settings', env: 'Uses OPENAI_API_KEY and optional OPENAI_BASE_URL from .env.' },
+            { key: 'azure-openai', title: 'Azure OpenAI Settings', env: 'Uses AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, optional AZURE_OPENAI_API_VERSION from .env.' },
+            { key: 'gemini', title: 'Gemini Settings', env: 'Uses GEMINI_API_KEY and optional GEMINI_BASE_URL from .env.' }
+        ];
+
+        const STORAGE_KEY = 'bedrock-local-workbench-state-v1';
+
+        const createConversation = () => ({
+            id: crypto.randomUUID(),
+            title: 'New Chat',
+            messages: [],
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+        });
+
+        const getConversationTitle = (messages) => {
+            const firstUserMessage = messages.find((m) => m.role === 'user' && m.content?.trim());
+            if (!firstUserMessage) return 'New Chat';
+            return firstUserMessage.content.trim().split('\n')[0].slice(0, 40);
+        };
+
+        const loadPersistedState = () => {
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                return raw ? JSON.parse(raw) : null;
+            } catch {
+                return null;
+            }
+        };
+
+        function App() {
+            const persistedStateRef = useRef(undefined);
+            if (persistedStateRef.current === undefined) {
+                persistedStateRef.current = loadPersistedState();
+            }
+            const persistedState = persistedStateRef.current;
+            const initialConversations = persistedState?.conversations?.length
+                ? persistedState.conversations
+                : [createConversation()];
+            const initialModels = withFreeModel(
+                Array.isArray(persistedState?.models) && persistedState.models.length > 0
+                    ? persistedState.models
+                    : []
+            );
+
+            const [conversations, setConversations] = useState(initialConversations);
+            const [activeConversationId, setActiveConversationId] = useState(
+                persistedState?.activeConversationId && initialConversations.some((c) => c.id === persistedState.activeConversationId)
+                    ? persistedState.activeConversationId
+                    : initialConversations[0].id
+            );
+            const [input, setInput] = useState('');
+            const [systemPrompt, setSystemPrompt] = useState(
+                persistedState?.systemPrompt || 'You are a helpful AI assistant. When provided with documents, analyze them carefully.'
+            );
+            const [models, setModels] = useState(
+                initialModels
+            );
+            const [modelDrafts, setModelDrafts] = useState(
+                Array.isArray(persistedState?.modelDrafts) && persistedState.modelDrafts.length > 0
+                    ? withoutFreeModel(persistedState.modelDrafts).map(toModelDraft)
+                    : (Array.isArray(persistedState?.models) && persistedState.models.length > 0
+                        ? withoutFreeModel(persistedState.models).map(toModelDraft)
+                        : withoutFreeModel([]).map(toModelDraft))
+            );
+            const [modelDraftError, setModelDraftError] = useState('');
+            const [settingsTab, setSettingsTab] = useState(
+                persistedState?.settingsTab || 'general'
+            );
+            const [providerTestStatus, setProviderTestStatus] = useState({});
+            const [providerTestLoading, setProviderTestLoading] = useState({});
+            const [selectedModelKey, setSelectedModelKey] = useState(
+                persistedState?.selectedModelKey && initialModels.some((m) => modelKey(m) === persistedState.selectedModelKey)
+                    ? persistedState.selectedModelKey
+                    : modelKey(initialModels[0])
+            );
+            const [temperature, setTemperature] = useState(
+                persistedState?.temperature ?? 1.0
+            );
+            const [topP, setTopP] = useState(
+                persistedState?.topP ?? 1
+            );
+            const [topK, setTopK] = useState(
+                persistedState?.topK ?? 50
+            );
+            const [maxTokens, setMaxTokens] = useState(
+                persistedState?.maxTokens ?? 4096
+            );
+            const [thinkingType, setThinkingType] = useState(
+                persistedState?.thinkingType || 'adaptive'
+            );
+            const [outputEffort, setOutputEffort] = useState(
+                persistedState?.outputEffort || 'medium'
+            );
+            const [showGenerationSettings, setShowGenerationSettings] = useState(
+                persistedState?.showGenerationSettings ?? false
+            );
+            const [memoryMode, setMemoryMode] = useState(
+                persistedState?.memoryMode || 'persistent'
+            );
+            const [isLoading, setIsLoading] = useState(false);
+            const [attachments, setAttachments] = useState([]);
+            const [uploadNotice, setUploadNotice] = useState('');
+            const [showSettings, setShowSettings] = useState(true);
+            const [sidebarWidth, setSidebarWidth] = useState(
+                persistedState?.sidebarWidth ?? 320
+            );
+            const messagesEndRef = useRef(null);
+            const fileInputRef = useRef(null);
+            const selectedModel = models.find((m) => modelKey(m) === selectedModelKey) || models[0] || FREE_GPT5_MODEL;
+            const activeConversation = conversations.find((c) => c.id === activeConversationId) || conversations[0];
+            const messages = activeConversation?.messages || [];
+            const sortedConversations = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt);
+
+            const updateActiveConversationMessages = (nextMessages) => {
+                setConversations((prev) =>
+                    prev.map((chat) =>
+                        chat.id === activeConversationId
+                            ? {
+                                ...chat,
+                                messages: nextMessages,
+                                title: getConversationTitle(nextMessages),
+                                updatedAt: Date.now()
+                            }
+                            : chat
+                    )
+                );
+            };
+
+            const createNewChat = () => {
+                const newChat = createConversation();
+                setConversations((prev) => [newChat, ...prev]);
+                setActiveConversationId(newChat.id);
+                setInput('');
+                setAttachments([]);
+            };
+
+            const deleteChat = (chatId) => {
+                setConversations((prev) => {
+                    const filtered = prev.filter((chat) => chat.id !== chatId);
+                    const nextChats = filtered.length > 0 ? filtered : [createConversation()];
+
+                    if (!nextChats.some((chat) => chat.id === activeConversationId)) {
+                        setActiveConversationId(nextChats[0].id);
+                    }
+
+                    return nextChats;
+                });
+            };
+
+            const selectChat = (chatId) => {
+                setActiveConversationId(chatId);
+                setAttachments([]);
+            };
+
+            const startSidebarResize = (e) => {
+                e.preventDefault();
+                const minWidth = 260;
+                const maxWidth = 520;
+
+                const onMove = (moveEvent) => {
+                    const nextWidth = Math.max(minWidth, Math.min(maxWidth, moveEvent.clientX));
+                    setSidebarWidth(nextWidth);
+                };
+
+                const onUp = () => {
+                    window.removeEventListener('mousemove', onMove);
+                    window.removeEventListener('mouseup', onUp);
+                };
+
+                window.addEventListener('mousemove', onMove);
+                window.addEventListener('mouseup', onUp);
+            };
+
+            const updateModelDraft = (index, key, value) => {
+                setModelDrafts((prev) => prev.map((draft, i) => i === index ? { ...draft, [key]: value } : draft));
+            };
+
+            const addModelDraft = (provider) => {
+                const base = createEmptyModelDraft();
+                setModelDrafts((prev) => [...prev, { ...base, provider: provider || base.provider }]);
+            };
+
+            const removeModelDraft = (index) => {
+                setModelDrafts((prev) => prev.filter((_, i) => i !== index));
+            };
+
+            const saveModelConfig = () => {
+                try {
+                    const normalized = modelDrafts
+                        .map((draft) => ({
+                            name: String(draft.name || '').trim(),
+                            provider: String(draft.provider || '').trim(),
+                            id: String(draft.id || '').trim(),
+                            inferenceProfileArn: String(draft.inferenceProfileArn || '').trim(),
+                            azureDeployment: String(draft.azureDeployment || '').trim(),
+                            bedrockMaxTokens: String(draft.bedrockMaxTokens ?? '').trim(),
+                            bedrockStopSequences: String(draft.bedrockStopSequences || '').trim(),
+                            bedrockLatency: String(draft.bedrockLatency || '').trim(),
+                        }))
+                        .filter((draft) =>
+                            draft.name || draft.id || draft.inferenceProfileArn || draft.azureDeployment ||
+                            draft.bedrockMaxTokens || draft.bedrockStopSequences || draft.bedrockLatency
+                        );
+
+                    if (normalized.length === 0) {
+                        throw new Error('Add at least one model before saving.');
+                    }
+
+                    const providers = new Set(['bedrock', 'openai', 'azure-openai', 'gemini']);
+                    const nextModels = normalized.map((draft, idx) => {
+                        if (!draft.name || !draft.id || !draft.provider) {
+                            throw new Error(`Model row ${idx + 1} needs Name, Provider, and Model ID.`);
+                        }
+                        if (!providers.has(draft.provider)) {
+                            throw new Error(`Model row ${idx + 1} has unsupported provider: ${draft.provider}`);
+                        }
+
+                        if (draft.provider === 'bedrock' && draft.bedrockMaxTokens) {
+                            const parsedMaxTokens = Number(draft.bedrockMaxTokens);
+                            if (!Number.isFinite(parsedMaxTokens) || parsedMaxTokens < 1 || parsedMaxTokens > 64000) {
+                                throw new Error(`Model row ${idx + 1} Bedrock Max Tokens must be between 1 and 64000.`);
+                            }
+                        }
+
+                        return {
+                            id: draft.id,
+                            name: draft.name,
+                            provider: draft.provider,
+                            inferenceProfileArn: draft.inferenceProfileArn || undefined,
+                            azureDeployment: draft.azureDeployment || undefined,
+                            bedrockMaxTokens: draft.bedrockMaxTokens ? Number(draft.bedrockMaxTokens) : undefined,
+                            bedrockStopSequences: draft.bedrockStopSequences
+                                ? draft.bedrockStopSequences.split('\n').map((s) => s.trim()).filter(Boolean)
+                                : undefined,
+                            bedrockLatency: draft.bedrockLatency || undefined,
+                        };
+                    });
+
+                    const nextModelsWithFree = withFreeModel(nextModels);
+
+                    setModels(nextModelsWithFree);
+                    setModelDrafts(withoutFreeModel(nextModelsWithFree).map(toModelDraft));
+                    if (!nextModelsWithFree.some((m) => modelKey(m) === selectedModelKey)) {
+                        setSelectedModelKey(modelKey(nextModelsWithFree[0]));
+                    }
+                    setModelDraftError('');
+                } catch (err) {
+                    setModelDraftError(err.message || 'Unable to save model settings.');
+                }
+            };
+
+            const testProviderConnection = async (provider) => {
+                const draftForProvider = modelDrafts.find((d) => d.provider === provider && d.id && d.name);
+                const modelForProvider = draftForProvider
+                    ? {
+                        id: String(draftForProvider.id).trim(),
+                        name: String(draftForProvider.name).trim(),
+                        provider,
+                        inferenceProfileArn: String(draftForProvider.inferenceProfileArn || '').trim() || undefined,
+                        azureDeployment: String(draftForProvider.azureDeployment || '').trim() || undefined,
+                        bedrockMaxTokens: draftForProvider.bedrockMaxTokens ? Number(draftForProvider.bedrockMaxTokens) : undefined,
+                        bedrockStopSequences: draftForProvider.bedrockStopSequences
+                            ? String(draftForProvider.bedrockStopSequences).split('\n').map((s) => s.trim()).filter(Boolean)
+                            : undefined,
+                        bedrockLatency: String(draftForProvider.bedrockLatency || '').trim() || undefined,
+                    }
+                    : models.find((m) => m.provider === provider);
+                if (!modelForProvider) {
+                    setProviderTestStatus((prev) => ({ ...prev, [provider]: 'No model configured for this provider.' }));
+                    return;
+                }
+
+                setProviderTestLoading((prev) => ({ ...prev, [provider]: true }));
+                setProviderTestStatus((prev) => ({ ...prev, [provider]: 'Testing connection...' }));
+
+                try {
+                    const response = await fetch('/api/test-provider', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            provider,
+                            selectedModel: modelForProvider
+                        })
+                    });
+
+                    const raw = await response.text();
+                    let data = null;
+                    try {
+                        data = raw ? JSON.parse(raw) : null;
+                    } catch {
+                        data = null;
+                    }
+
+                    if (!response.ok || !data?.ok) {
+                        const fallback = raw?.trim()
+                            ? raw.slice(0, 200)
+                            : 'Connection test failed. If this server was running before updates, restart it to load /api/test-provider.';
+                        throw new Error(data?.error || fallback);
+                    }
+
+                    if (Math.random() < 0.01) {
+                        setProviderTestStatus((prev) => ({ ...prev, [provider]: 'Failed successfully ¯\\(ツ)/¯' }));
+                        return;
+                    }
+
+                    setProviderTestStatus((prev) => ({ ...prev, [provider]: `Connected (${modelForProvider.name})` }));
+                } catch (error) {
+                    if (Math.random() < 0.01) {
+                        setProviderTestStatus((prev) => ({ ...prev, [provider]: 'Failed successfully ¯\\(ツ)/¯' }));
+                        return;
+                    }
+                    setProviderTestStatus((prev) => ({ ...prev, [provider]: `Failed: ${error.message}` }));
+                } finally {
+                    setProviderTestLoading((prev) => ({ ...prev, [provider]: false }));
+                }
+            };
+
+            useEffect(() => {
+                messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            }, [messages]);
+
+            useEffect(() => {
+                localStorage.setItem(
+                    STORAGE_KEY,
+                    JSON.stringify({
+                        conversations,
+                        activeConversationId,
+                        systemPrompt,
+                        models,
+                        modelDrafts,
+                        settingsTab,
+                        selectedModelKey,
+                        temperature,
+                        topP,
+                        topK,
+                        maxTokens,
+                        thinkingType,
+                        outputEffort,
+                        showGenerationSettings,
+                        memoryMode,
+                        sidebarWidth
+                    })
+                );
+            }, [conversations, activeConversationId, systemPrompt, models, modelDrafts, settingsTab, selectedModelKey, temperature, topP, topK, maxTokens, thinkingType, outputEffort, showGenerationSettings, memoryMode, sidebarWidth]);
+
+            const handleFileSelect = async (e) => {
+                const files = Array.from(e.target.files);
+                const hasExe = files.some((file) => file.name.toLowerCase().endsWith('.exe'));
+                const allowedFiles = files.filter((file) => !file.name.toLowerCase().endsWith('.exe'));
+                const newAttachments = [];
+
+                if (hasExe) {
+                    setUploadNotice('LOL no. Nice try though.');
+                }
+
+                for (const file of allowedFiles) {
+                    try {
+                        const text = await file.text();
+                        newAttachments.push({
+                            name: file.name,
+                            type: file.type,
+                            content: text,
+                            size: file.size
+                        });
+                    } catch (err) {
+                        console.error("Error reading file", file.name, err);
+                        alert(`Could not read ${file.name}`);
+                    }
+                }
+                const combined = [...attachments, ...newAttachments];
+                setAttachments(combined);
+                if (combined.length >= 5) {
+                    setUploadNotice("Someone's optimistic about context windows");
+                } else if (!hasExe) {
+                    setUploadNotice('');
+                }
+                if (fileInputRef.current) fileInputRef.current.value = '';
+            };
+
+            const removeAttachment = (index) => {
+                const nextAttachments = attachments.filter((_, i) => i !== index);
+                setAttachments(nextAttachments);
+                if (nextAttachments.length < 5 && uploadNotice === "Someone's optimistic about context windows") {
+                    setUploadNotice('');
+                }
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                if ((!input.trim() && attachments.length === 0) || isLoading) return;
+
+                let fullContent = input;
+                
+                if (attachments.length > 0) {
+                    const filesContent = attachments.map(f => 
+                        `<document name="${f.name}">\n${f.content}\n</document>`
+                    ).join('\n\n');
+                    
+                    fullContent = `${fullContent}\n\n${filesContent}`;
+                }
+
+                const newUserMsg = { role: 'user', content: fullContent, displayFiles: attachments };
+                const newHistory = [...messages, newUserMsg];
+                const requestHistory = memoryMode === 'persistent' ? newHistory : [newUserMsg];
+
+                updateActiveConversationMessages(newHistory);
+                setInput('');
+                setAttachments([]);
+                setIsLoading(true);
+
+                if (selectedModel.provider === 'free-gpt5' && selectedModel.id === FREE_GPT5_MODEL.id) {
+                    updateActiveConversationMessages([...newHistory, { role: 'assistant', content: 'lol you wish' }]);
+                    setIsLoading(false);
+                    return;
+                }
+
+                try {
+                    const response = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            messages: requestHistory
+                                .filter(m => m.role === 'user' || m.role === 'assistant')
+                                .map(m => ({ role: m.role, content: m.content })),
+                            system: String(systemPrompt ?? ''),
+                            model: selectedModel.id,
+                            selectedModel,
+                            temperature: parseFloat(temperature),
+                            ...(selectedModel.provider !== 'bedrock' ? {
+                                top_p: Number(topP),
+                                top_k: Number(topK),
+                            } : {}),
+                            max_tokens: Number(maxTokens),
+                            thinking_type: thinkingType,
+                            output_effort: outputEffort
+                        })
+                    });
+
+                    const data = await response.json();
+
+                    if (!response.ok) {
+                        throw new Error(data.error || 'Failed to fetch response');
+                    }
+
+                    updateActiveConversationMessages([...newHistory, { role: 'assistant', content: data.content }]);
+                } catch (error) {
+                    updateActiveConversationMessages([
+                        ...newHistory,
+                        { role: 'assistant', content: `Error: ${error.message}`, isError: true }
+                    ]);
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            return (
+                <div className="flex h-screen overflow-hidden font-sans" why-did-i-use-react="good question" refactored="never" will-fix-later="narrator: they didn't">
+                    <div
+                        className="bg-slate-900 border-r border-slate-800 transition-all duration-300 flex flex-col flex-shrink-0 relative overflow-hidden"
+                        style={{ width: showSettings ? `${sidebarWidth}px` : '0px' }}
+                    >
+                        <div className="p-4 border-b border-slate-800 flex justify-between items-center">
+                            <h2 className="font-bold text-slate-100">Configuration</h2>
+                            <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-white p-1 rounded hover:bg-slate-800">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                            </button>
+                        </div>
+                        <div className="p-4 flex-1 overflow-y-auto space-y-6">
+                            <div className="grid grid-cols-2 gap-2">
+                                <button
+                                    onClick={() => setSettingsTab('general')}
+                                    className={`text-xs rounded p-2 border ${settingsTab === 'general' ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-300'}`}
+                                >
+                                    General
+                                </button>
+                                <button
+                                    onClick={() => setSettingsTab('models')}
+                                    className={`text-xs rounded p-2 border ${settingsTab === 'models' ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-300'}`}
+                                >
+                                    Models
+                                </button>
+                            </div>
+
+                            {settingsTab === 'general' && (
+                                <>
+                                    <div>
+                                        <div className="flex items-center justify-between mb-2">
+                                            <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider">Chats</label>
+                                            <button
+                                                onClick={createNewChat}
+                                                className="text-xs bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 rounded"
+                                            >
+                                                New Chat
+                                            </button>
+                                        </div>
+                                        <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                                            {sortedConversations.map((chat) => (
+                                                <button
+                                                    key={chat.id}
+                                                    onClick={() => selectChat(chat.id)}
+                                                    className={`w-full text-left p-2 rounded border transition-colors ${chat.id === activeConversationId ? 'bg-slate-700 border-slate-500' : 'bg-slate-800 border-slate-700 hover:border-slate-600'}`}
+                                                >
+                                                    <div className="flex items-start justify-between gap-2">
+                                                        <div className="min-w-0">
+                                                            <div className="text-sm text-slate-100 truncate">{chat.title || 'New Chat'}</div>
+                                                            <div className="text-[11px] text-slate-400">{chat.messages.length} messages</div>
+                                                        </div>
+                                                        <span
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                deleteChat(chat.id);
+                                                            }}
+                                                            className="text-slate-400 hover:text-red-400 text-xs px-1"
+                                                            title="Delete chat"
+                                                        >
+                                                            ✕
+                                                        </span>
+                                                    </div>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Memory Mode</label>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <button
+                                                onClick={() => setMemoryMode('one-shot')}
+                                                className={`text-xs rounded p-2 border ${memoryMode === 'one-shot' ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-300'}`}
+                                            >
+                                                One-shot
+                                            </button>
+                                            <button
+                                                onClick={() => setMemoryMode('persistent')}
+                                                className={`text-xs rounded p-2 border ${memoryMode === 'persistent' ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-300'}`}
+                                            >
+                                                Persistent
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Model</label>
+                                        <select
+                                            value={selectedModelKey}
+                                            onChange={(e) => setSelectedModelKey(e.target.value)}
+                                            className="w-full bg-slate-800 border border-slate-700 text-slate-200 rounded p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                                        >
+                                            {models.map((m) => <option key={modelKey(m)} value={modelKey(m)}>{m.name} ({m.provider})</option>)}
+                                        </select>
+                                    </div>
+
+                                    <div className="bg-slate-800 border border-slate-700 rounded p-3">
+                                        <button
+                                            onClick={() => setShowGenerationSettings((prev) => !prev)}
+                                            className="w-full flex items-center justify-between text-xs font-semibold text-slate-300 uppercase tracking-wider"
+                                        >
+                                            <span>Generation Settings</span>
+                                            <span>{showGenerationSettings ? 'Hide' : 'Show'}</span>
+                                        </button>
+                                        {showGenerationSettings && (
+                                            <div className="mt-3 space-y-3">
+                                                <div>
+                                                    <label className="block text-xs text-slate-400 mb-1">Temperature ({temperature})</label>
+                                                    <input
+                                                        type="range"
+                                                        min="0" max="2" step="0.1"
+                                                        value={temperature}
+                                                        onChange={(e) => setTemperature(Number(e.target.value))}
+                                                        className="w-full accent-blue-500"
+                                                    />
+                                                </div>
+                                                {selectedModel.provider !== 'bedrock' && (
+                                                    <>
+                                                        <div>
+                                                            <label className="block text-xs text-slate-400 mb-1">Top P</label>
+                                                            <input
+                                                                type="number"
+                                                                min="0" max="1" step="0.05"
+                                                                value={topP}
+                                                                onChange={(e) => setTopP(e.target.value)}
+                                                                className="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded p-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-xs text-slate-400 mb-1">Top K</label>
+                                                            <input
+                                                                type="number"
+                                                                min="0" step="1"
+                                                                value={topK}
+                                                                onChange={(e) => setTopK(e.target.value)}
+                                                                className="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded p-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                                                            />
+                                                        </div>
+                                                    </>
+                                                )}
+                                                <div>
+                                                    <label className="block text-xs text-slate-400 mb-1">Max Tokens</label>
+                                                    <input
+                                                        type="number"
+                                                        min="1" max="64000" step="1"
+                                                        value={maxTokens}
+                                                        onChange={(e) => setMaxTokens(e.target.value)}
+                                                        className="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded p-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                                                    />
+                                                </div>
+                                                {selectedModel.provider === 'bedrock' && (
+                                                    <>
+                                                        <div>
+                                                            <label className="block text-xs text-slate-400 mb-1">Thinking Type</label>
+                                                            <select
+                                                                value={thinkingType}
+                                                                onChange={(e) => setThinkingType(e.target.value)}
+                                                                className="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded p-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                                                            >
+                                                                <option value="adaptive">adaptive</option>
+                                                            </select>
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-xs text-slate-400 mb-1">Output Effort</label>
+                                                            <select
+                                                                value={outputEffort}
+                                                                onChange={(e) => setOutputEffort(e.target.value)}
+                                                                className="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded p-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                                                            >
+                                                                <option value="low">low</option>
+                                                                <option value="medium">medium</option>
+                                                                <option value="high">high</option>
+                                                            </select>
+                                                        </div>
+                                                    </>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                                            System Prompt
+                                        </label>
+                                        <textarea
+                                            value={systemPrompt}
+                                            onChange={(e) => setSystemPrompt(e.target.value)}
+                                            className="w-full h-64 bg-slate-800 border border-slate-700 text-slate-200 rounded p-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                                            placeholder="Enter system instructions..."
+                                        />
+                                        {/you are god/i.test(systemPrompt) && (
+                                            <div className="mt-2 text-xs text-amber-300">Calm down there, Oppenheimer</div>
+                                        )}
+                                    </div>
+                                </>
+                            )}
+
+                            {settingsTab === 'models' && (
+                                <>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                                            Model Setup
+                                        </label>
+                                        <p className="text-xs text-slate-400 mb-3">
+                                            Configure provider models here. Backend secrets stay in <code>.env</code>.
+                                        </p>
+                                        <div className="space-y-4 max-h-[28rem] overflow-y-auto pr-1">
+                                            {PROVIDER_SECTIONS.map((provider) => {
+                                                const rows = modelDrafts
+                                                    .map((draft, index) => ({ draft, index }))
+                                                    .filter((item) => item.draft.provider === provider.key);
+
+                                                return (
+                                                    <div key={provider.key} className="bg-slate-800 border border-slate-700 rounded p-3 space-y-2">
+                                                        <div className="flex items-center justify-between">
+                                                            <div>
+                                                                <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">{provider.title}</div>
+                                                                <div className="text-[11px] text-slate-400">{provider.env}</div>
+                                                            </div>
+                                                            <button
+                                                                onClick={() => testProviderConnection(provider.key)}
+                                                                className="text-xs bg-slate-700 hover:bg-slate-600 text-slate-100 px-2 py-1 rounded disabled:opacity-60"
+                                                                disabled={Boolean(providerTestLoading[provider.key])}
+                                                            >
+                                                                {providerTestLoading[provider.key] ? 'Testing...' : 'Test'}
+                                                            </button>
+                                                        </div>
+                                                        {providerTestStatus[provider.key] && (
+                                                            <div className="text-[11px] text-slate-400">{providerTestStatus[provider.key]}</div>
+                                                        )}
+
+                                                        {rows.map(({ draft, index }) => (
+                                                            <div key={index} className="bg-slate-900 border border-slate-700 rounded p-3 space-y-2">
+                                                                <div className="flex items-center justify-between">
+                                                                    <span className="text-xs text-slate-300">Model {index + 1}</span>
+                                                                    <button
+                                                                        onClick={() => removeModelDraft(index)}
+                                                                        className="text-xs text-red-400 hover:text-red-300"
+                                                                    >
+                                                                        Remove
+                                                                    </button>
+                                                                </div>
+                                                                <input
+                                                                    value={draft.name}
+                                                                    onChange={(e) => updateModelDraft(index, 'name', e.target.value)}
+                                                                    placeholder="Display Name"
+                                                                    className="w-full bg-slate-950 border border-slate-700 text-slate-200 rounded p-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                                                                />
+                                                                <input
+                                                                    value={draft.id}
+                                                                    onChange={(e) => updateModelDraft(index, 'id', e.target.value)}
+                                                                    placeholder="Model ID"
+                                                                    className="w-full bg-slate-950 border border-slate-700 text-slate-200 rounded p-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                                                                />
+                                                                <input
+                                                                    value={draft.inferenceProfileArn}
+                                                                    onChange={(e) => updateModelDraft(index, 'inferenceProfileArn', e.target.value)}
+                                                                    placeholder="Inference Profile ARN (optional, Bedrock)"
+                                                                    className="w-full bg-slate-950 border border-slate-700 text-slate-200 rounded p-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                                                                />
+                                                                <input
+                                                                    value={draft.azureDeployment}
+                                                                    onChange={(e) => updateModelDraft(index, 'azureDeployment', e.target.value)}
+                                                                    placeholder="Azure Deployment Name (optional)"
+                                                                    className="w-full bg-slate-950 border border-slate-700 text-slate-200 rounded p-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                                                                />
+                                                                {provider.key === 'bedrock' && (
+                                                                    <>
+                                                                        <input
+                                                                            type="number"
+                                                                            min="1"
+                                                                            max="64000"
+                                                                            value={draft.bedrockMaxTokens}
+                                                                            onChange={(e) => updateModelDraft(index, 'bedrockMaxTokens', e.target.value)}
+                                                                            placeholder="Bedrock Max Tokens (optional, up to 64000)"
+                                                                            className="w-full bg-slate-950 border border-slate-700 text-slate-200 rounded p-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                                                                        />
+                                                                        <textarea
+                                                                            value={draft.bedrockStopSequences}
+                                                                            onChange={(e) => updateModelDraft(index, 'bedrockStopSequences', e.target.value)}
+                                                                            placeholder="Bedrock Stop Sequences (optional, one per line)"
+                                                                            className="w-full h-20 bg-slate-950 border border-slate-700 text-slate-200 rounded p-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                                                                        />
+                                                                        <select
+                                                                            value={draft.bedrockLatency}
+                                                                            onChange={(e) => updateModelDraft(index, 'bedrockLatency', e.target.value)}
+                                                                            className="w-full bg-slate-950 border border-slate-700 text-slate-200 rounded p-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+                                                                        >
+                                                                            <option value="">Performance Latency (optional)</option>
+                                                                            <option value="standard">standard</option>
+                                                                            <option value="optimized">optimized</option>
+                                                                        </select>
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        ))}
+
+                                                        <button
+                                                            onClick={() => addModelDraft(provider.key)}
+                                                            className="text-xs bg-slate-700 hover:bg-slate-600 text-slate-100 px-2 py-1 rounded"
+                                                        >
+                                                            Add {provider.key} Model
+                                                        </button>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                        {modelDraftError && (
+                                            <div className="text-xs text-red-400 mt-2">{modelDraftError}</div>
+                                        )}
+                                        <div className="flex gap-2 mt-3">
+                                            <button
+                                                onClick={saveModelConfig}
+                                                className="text-xs bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 rounded"
+                                            >
+                                                Save Models
+                                            </button>
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                        {showSettings && (
+                            <div
+                                onMouseDown={startSidebarResize}
+                                className="absolute top-0 right-0 h-full w-1 cursor-col-resize bg-slate-700/40 hover:bg-blue-600/60"
+                                title="Drag to resize"
+                            />
+                        )}
+                    </div>
+
+                    <div className="flex-1 flex flex-col bg-slate-950 relative min-w-0">
+                        <div className="h-14 border-b border-slate-800 flex items-center px-4 justify-between bg-slate-900/50 backdrop-blur">
+                            <div className="flex items-center gap-3">
+                                {!showSettings && (
+                                    <button onClick={() => setShowSettings(true)} className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 transition-colors">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+                                    </button>
+                                )}
+                                <span className="font-medium text-slate-200 truncate">{selectedModel.name} · {memoryMode === 'persistent' ? 'Persistent' : 'One-shot'}</span>
+                            </div>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto p-4 space-y-6">
+                            {messages.length === 0 && (
+                                <div className="h-full flex flex-col items-center justify-center text-slate-500 opacity-50">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                                    <p className="mt-4 text-sm">Start a conversation with Bedrock</p>
+                                </div>
+                            )}
+                            
+                            {messages.map((msg, idx) => (
+                                <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                    <div className={`max-w-3xl rounded-2xl p-4 ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-200 border border-slate-700'}`}>
+                                        {msg.displayFiles && msg.displayFiles.length > 0 && (
+                                            <div className="mb-3 flex flex-wrap gap-2">
+                                                {msg.displayFiles.map((f, i) => (
+                                                    <div key={i} className="bg-black/20 text-xs px-2 py-1 rounded flex items-center gap-1 border border-white/10">
+                                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+                                                        {f.name}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                        <div className="whitespace-pre-wrap leading-relaxed">
+                                            {msg.role === 'user' ? msg.content.split('\n\n<document name=')[0] : msg.content}
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                            {isLoading && (
+                                <div className="flex justify-start">
+                                    <div className="bg-slate-800 rounded-2xl p-4 border border-slate-700 flex items-center gap-2">
+                                        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
+                                        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce delay-75"></div>
+                                        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce delay-150"></div>
+                                    </div>
+                                </div>
+                            )}
+                            <div ref={messagesEndRef} />
+                        </div>
+
+                        <div className="p-4 bg-slate-900 border-t border-slate-800">
+                            {attachments.length > 0 && (
+                                <div className="flex flex-wrap gap-2 mb-3">
+                                    {attachments.map((file, i) => (
+                                        <div key={i} className="bg-slate-800 text-slate-200 text-xs pl-2 pr-1 py-1 rounded-full flex items-center gap-2 border border-slate-700">
+                                            <span className="truncate max-w-[150px]">{file.name}</span>
+                                            <button onClick={() => removeAttachment(i)} className="p-0.5 hover:bg-slate-700 rounded-full">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                            {uploadNotice && (
+                                <div className="text-xs text-slate-300 mb-2">{uploadNotice}</div>
+                            )}
+                            
+                            <form onSubmit={handleSubmit} className="flex items-end gap-2 bg-slate-800 p-2 rounded-xl border border-slate-700 focus-within:border-blue-500 transition-colors">
+                                <input 
+                                    type="file" 
+                                    multiple 
+                                    ref={fileInputRef}
+                                    className="hidden" 
+                                    onChange={handleFileSelect}
+                                    accept=".txt,.json,.md,.csv,.js,.py,.ts,.html,.css"
+                                />
+                                <button 
+                                    type="button"
+                                    onClick={() => fileInputRef.current?.click()}
+                                    className="p-2 text-slate-400 hover:text-blue-400 hover:bg-slate-700/50 rounded-lg transition-colors"
+                                    title="Attach files (txt, json, etc)"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                                </button>
+                                
+                                <textarea
+                                    value={input}
+                                    onChange={(e) => setInput(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter' && !e.shiftKey) {
+                                            e.preventDefault();
+                                            handleSubmit(e);
+                                        }
+                                    }}
+                                    placeholder="Type a message..."
+                                    className="flex-1 bg-transparent text-slate-200 placeholder-slate-500 text-sm p-2 outline-none resize-none max-h-32 scrollbar-hide"
+                                    rows="1"
+                                />
+                                
+                                <button 
+                                    type="submit"
+                                    disabled={(!input.trim() && attachments.length === 0) || isLoading}
+                                    className="p-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                                </button>
+                            </form>
+                            <div className="text-center mt-2">
+                                <span className="text-[10px] text-slate-100">Press Alt+F4 for dark mode</span>
+                            </div>
+                            <div className="text-center mt-1">
+                                <span
+                                    className="text-[10px] text-slate-100"
+                                    data-real-footer={"console.log('why are you reading the footer'). Made by someone who googles 'center a div' daily\""}
+                                >
+                                    Inspect Element to find the REAL footer
+                                </span>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => window.open('https://www.youtube.com/shorts/Ay8lynMZ4mE', '_blank', 'noopener,noreferrer')}
+                                className="absolute bottom-1 right-1 text-[9px] text-white opacity-40 hover:opacity-70"
+                            >
+                                Don't Click
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+    <!-- TODO: make this not look terrible -->
+    <!-- yes this is in production, no we don't talk about it -->
+</body>
+</html>
