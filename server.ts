@@ -114,7 +114,8 @@ async function callBedrock(args: {
   }
 
   const data = JSON.parse(responseText);
-  return data.output?.message?.content?.[0]?.text || '';
+  const textBlock = (data.output?.message?.content as any[])?.find((b: any) => b.text !== undefined);
+return textBlock?.text || '';
 }
 
 async function callOpenAI(args: {
